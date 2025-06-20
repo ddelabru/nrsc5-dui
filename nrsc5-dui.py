@@ -20,7 +20,7 @@
 #    Updated by zefie for modern nrsc5 ~ 2019
 #    Updated and enhanced by markjfine ~ 2021-25
 
-import os, pty, select, sys, shutil, re, json, datetime, numpy, glob, time, platform, io
+import os, pty, select, sys, shutil, re, json, datetime, numpy, glob, time, platform, io, tempfile
 from subprocess import Popen, PIPE
 from threading import Timer, Thread
 from dateutil import tz
@@ -108,6 +108,8 @@ class NRSC5_DUI(object):
         self.statusTimer    = None      # status update timer
         self.imageChanged   = False     # has the album art changed
         self.xhdrChanged    = False     # has the HDDR data changed
+        self.fifoDir        = None      # temporary directory for named pipe
+        self.fifoPath       = None      # full path of named pipe
         self.nrsc5Args      = []        # arguments for nrsc5
         self.logFile        = None      # nrsc5 log file
         self.lastImage      = ""        # last image file displayed
@@ -699,7 +701,15 @@ class NRSC5_DUI(object):
                 if self.cbxSDRPlayAnt.get_active_text() != "Auto":
                     self.nrsc5Args.append("-A")
                     self.nrsc5Args.append("Antenna "+self.cbxSDRPlayAnt.get_active_text())
-            
+
+            # set up FIFO if enabled
+            if hasattr(os, "mkfifo") and (self.cbUseFIFO.get_active()):
+                self.fifoDir = tempfile.TemporaryDirectory()
+                self.fifoPath = os.path.join(self.fifoDir.name, "radio.wav")
+                os.mkfifo(self.fifoPath)
+                self.nrsc5Args.append("-o")
+                self.nrsc5Args.append(self.fifoPath)
+
             # set frequency and stream
             self.nrsc5Args.append(str(self.spinFreq.get_value()))
             self.nrsc5Args.append(str(int(self.streamNum)))
@@ -732,6 +742,8 @@ class NRSC5_DUI(object):
             self.btnPlay.set_sensitive(False)
             self.btnStop.set_sensitive(True)
             self.cbAutoGain.set_sensitive(False)
+            self.txtFIFOCmd.set_sensitive(False)
+            self.cbUseFIFO.set_sensitive(False)
             self.playing = True
             self.lastXHDR = ""
             self.lastLOT = ""
@@ -802,6 +814,8 @@ class NRSC5_DUI(object):
             self.btnStop.set_sensitive(False)
             self.btnBookmark.set_sensitive(False)
             self.cbAutoGain.set_sensitive(True)
+            self.txtFIFOCmd.set_sensitive(True)
+            self.cbUseFIFO.set_sensitive(True)
             
             # clear stream info
             self.initStreamInfo()
@@ -1066,6 +1080,11 @@ class NRSC5_DUI(object):
         FNULL = open(os.devnull, 'w')
         FTMP = open('tmp.log','w')
 
+
+        # open FIFO with wav play command if enabled
+        if hasattr(os, "mkfifo") and self.cbUseFIFO.get_active():
+            self.mpv = Popen([self.txtFIFOCmd.get_text(), self.fifoPath])
+
         # run nrsc5 and output stdout & stderr to pipes
         self.nrsc5 = Popen(self.nrsc5Args, shell=False, stdin=self.nrsc5slave, stdout=PIPE, stderr=PIPE, universal_newlines=True)
         
@@ -1095,6 +1114,8 @@ class NRSC5_DUI(object):
                 # restart nrsc5 if it crashes
                 self.debugLog("Restarting NRSC5")
                 time.sleep(1)
+                if hasattr(os, "mkfifo") and self.cbUseFIFO.get_active():
+                    self.mpv = Popen([self.txtFIFOCmd.get_text(), self.fifoPath])
                 self.nrsc5 = Popen(self.nrsc5Args, shell=False, stdin=self.nrsc5slave, stdout=PIPE, stderr=PIPE, universal_newlines=True)
 
     def set_synchronization(self, state):
@@ -1805,6 +1826,9 @@ class NRSC5_DUI(object):
         self.cbCoverIncl   = builder.get_object("cbCoverIncl")
         self.lblExtend     = builder.get_object("lblExtend")
         self.cbExtend      = builder.get_object("cbExtend")
+        self.lblFIFO       = builder.get_object("lblFIFO")
+        self.txtFIFOCmd    = builder.get_object("txtFIFOCmd")
+        self.cbUseFIFO     = builder.get_object("cbUseFIFO")
         self.btnPlay       = builder.get_object("btnPlay")
         self.btnStop       = builder.get_object("btnStop")
         self.btnBookmark   = builder.get_object("btnBookmark")
@@ -2086,6 +2110,11 @@ class NRSC5_DUI(object):
                     self.cbDevIP.set_active(config["UseIP"])
                 if ("DevIP" in config):
                     self.txtDevIP.set_text(config["DevIP"])
+                self.cbUseFIFO.set_active(config.get("UseFIFO", False) and hasattr(os, "mkfifo"))
+                self.txtFIFOCmd.set_text(config.get("FIFOCmd", "mpv"))
+                self.lblFIFO.set_visible(hasattr(os, "mkfifo"))
+                self.txtFIFOCmd.set_visible(hasattr(os, "mkfifo"))
+                self.cbUseFIFO.set_visible(hasattr(os, "mkfifo"))
                 self.bookmarks = config["Bookmarks"]
                 for bookmark in self.bookmarks:
                     self.lsBookmarks.append(bookmark)
@@ -2160,7 +2189,7 @@ class NRSC5_DUI(object):
                 winX, winY = self.mainWindow.get_position()
                 width, height = self.mainWindow.get_size()
                 config = {
-                    "CfgVersion": "1.1.0",
+                    "CfgVersion": "1.1.1",
                     "WindowX"   : winX,
                     "WindowY"   : winY,
                     "Width"     : width,
@@ -2182,6 +2211,8 @@ class NRSC5_DUI(object):
                     "UseIP"     : self.cbDevIP.get_active(),
                     "Bookmarks" : self.bookmarks,
                     "MapData"   : self.mapData,
+                    "UseFIFO"   : self.cbUseFIFO.get_active(),
+                    "FIFOCmd"   : self.txtFIFOCmd.get_text(),
                 }
                 # sort bookmarks
                 config["Bookmarks"].sort(key=lambda t: t[2])
